@@ -1,0 +1,36 @@
+langchain_openai
+langchain_core
+python-dotenv
+streamlit
+langchain_community
+langserve
+fastapi
+uvicorn
+sse_starlette
+bs4
+pypdf
+faiss-cpu
+wikipedia
+arxiv
+google
+langchainhub
+langchain 
+ollama 
+dotenv
+google-generativeai
+langchain-google-genai
+
+requests
+ flask==2.0.1
+
+    
+ pdf2image==1.16.3
+ pytesseract==0.3.10
+
+langchain-text-splitters
+
+requests
+gradio
+
+qrcode
+pillow
