@@ -110,10 +110,10 @@ def build_vectordb():
     docs = []
     if os.path.exists("syllabus.pdf"):
         docs += load_local_pdf("syllabus.pdf")
-    for url in MANIT_URLS:
-        docs += safe_load_webpage(url)
-        for pdf in extract_pdf_links(url)[:2]:
-            docs += load_pdf_content(pdf)
+    # for url in MANIT_URLS:
+    #     docs += safe_load_webpage(url)
+    #     for pdf in extract_pdf_links(url)[:2]:
+    #         docs += load_pdf_content(pdf)
 
     if not docs:
         logging.info("No documents loaded; skipping FAISS index.")
