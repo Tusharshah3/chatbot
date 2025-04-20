@@ -26,3 +26,5 @@ langchain-google-community>=0.1.2
 arxiv>=1.4.0
 pypdf
 logging
+numpy
+faiss-cpu

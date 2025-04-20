@@ -3,6 +3,7 @@ import tempfile
 import requests
 import warnings
 import logging
+import gc
 from urllib.parse import urljoin
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -15,46 +16,54 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains import create_retrieval_chain
-from langchain.tools.retriever import create_retriever_tool
-from langchain_community.tools import Tool
+from langchain.agents import create_openai_tools_agent, AgentExecutor
 from langchain_community.utilities import ArxivAPIWrapper
 from langchain_community.tools import ArxivQueryRun
 from langchain import hub
-from langchain.agents import create_openai_tools_agent, AgentExecutor
 
-# Optional Google Search imports (new vs deprecated)
+# Optional Google Search imports
 try:
     from langchain_google_community import GoogleSearchAPIWrapper, GoogleSearchResults
 except ImportError:
-    warnings.warn("Using deprecated GoogleSearch imports. Consider installing langchain-google-community")
+    warnings.warn("Using deprecated GoogleSearch imports. Install langchain-google-community")
     from langchain_community.utilities import GoogleSearchAPIWrapper
     from langchain_community.tools.google_search.tool import GoogleSearchResults
 
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
-# ─── Load environment ─────────────────────────────────────────────────────────────
+# ─── Configuration ─────────────────────────────────────────────────────────────
 load_dotenv()
-os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY", "")
-os.environ["GOOGLE_CSE_ID"] = os.getenv("GOOGLE_CSE_ID", "")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ─── Helper functions ────────────────────────────────────────────────────────────
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")
+os.environ.update({"GOOGLE_API_KEY": GOOGLE_API_KEY, "GOOGLE_CSE_ID": GOOGLE_CSE_ID})
+
+# FAISS index path and embedding model
+_INDEX_PATH = "faiss_index"
+embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
+# URLs to crawl at index build time
+MANIT_URLS = [
+    "https://www.manit.ac.in/",
+    "https://www.manit.ac.in/academics",
+    "https://www.manit.ac.in/content/electrical-engineering",
+    "https://www.manit.ac.in/academics/programs"
+]
+
+# ─── Data loaders ──────────────────────────────────────────────────────────────
 def extract_pdf_links(url, base_domain="https://www.manit.ac.in"):
     try:
         resp = requests.get(url, verify=False, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, 'html.parser')
-        links = []
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if href.lower().endswith('.pdf'):
-                links.append(href if href.startswith('http') else urljoin(base_domain, href))
-        return links
+        return [href if href.startswith('http') else urljoin(base_domain, href)
+                for a in soup.select('a[href$=".pdf"]')
+                for href in [a['href']]]
     except Exception as e:
-        logging.error("error {e}")
+        logging.error(f"[extract_pdf_links] {e}")
         return []
+
 
 def load_pdf_content(pdf_url):
     try:
@@ -63,119 +72,103 @@ def load_pdf_content(pdf_url):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(resp.content)
             path = tmp.name
-        loader = PyPDFLoader(path)
-        docs = loader.load()
+        docs = PyPDFLoader(path).load()
         os.unlink(path)
-        logging.info("Loaded PDF: {pdf_url}")
+        logging.info(f"Loaded PDF: {pdf_url}")
         return docs
     except Exception as e:
-        logging.info("[load_pdf_content] {e}")
+        logging.error(f"[load_pdf_content] {e}")
         return []
+
 
 def safe_load_webpage(url):
     try:
         loader = WebBaseLoader(url)
-        session = requests.Session()
-        session.verify = False
-        loader.session = session
+        loader.session = requests.Session()
+        loader.session.verify = False
         docs = loader.load()
-        print(f"Loaded webpage: {url}")
+        logging.info(f"Loaded webpage: {url}")
         return docs
     except Exception as e:
-        logging.ino("[safe_load_webpage] {e}")
+        logging.error(f"[safe_load_webpage] {e}")
         return []
+
 
 def load_local_pdf(path):
     try:
-        loader = PyPDFLoader(path)
-        docs = loader.load()
-        logging.ino(f"Loaded local PDF: {path}")
+        docs = PyPDFLoader(path).load()
+        logging.info(f"Loaded local PDF: {path}")
         return docs
     except Exception as e:
-        logging.info(f"[load_local_pdf] {e}")
+        logging.error(f"[load_local_pdf] {e}")
         return []
 
-# ─── Build your knowledge base ──────────────────────────────────────────────────
-all_docs = []
+# ─── FAISS index management ────────────────────────────────────────────────────
+_graph = None
 
-# 1) Local PDF
-if os.path.exists("syllabus.pdf"):
-    all_docs += load_local_pdf("syllabus.pdf")
+def build_vectordb():
+    docs = []
+    if os.path.exists("syllabus.pdf"):
+        docs += load_local_pdf("syllabus.pdf")
+    for url in MANIT_URLS:
+        docs += safe_load_webpage(url)
+        for pdf in extract_pdf_links(url)[:2]:
+            docs += load_pdf_content(pdf)
 
-# 2) Web pages & PDFs
-manit_urls = [
-    "https://www.manit.ac.in/",
-    "https://www.manit.ac.in/academics",
-    "https://www.manit.ac.in/content/electrical-engineering",
-    "https://www.manit.ac.in/academics/programs"
-]
-for url in manit_urls:
-    all_docs += safe_load_webpage(url)
-    for pdf in extract_pdf_links(url)[:2]:
-        all_docs += load_pdf_content(pdf)
+    if not docs:
+        logging.info("No documents loaded; skipping FAISS index.")
+        return None
 
-if not all_docs:
-    logging.info("⚠️  No docs loaded; fallback to live search only.")
-else:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    documents = splitter.split_documents(all_docs)
-    logging.info(f"Document chunks: {len(documents)}")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_documents(docs)
+    logging.info(f"Building FAISS index with {len(chunks)} document chunks...")
 
-# 3) Vector store & retriever
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-vectordb   = FAISS.from_documents(documents, embeddings) if all_docs else None
-retriever  = vectordb.as_retriever(search_kwargs={"k": 5}) if vectordb else None
+    db = FAISS.from_documents(chunks, embeddings)
+    db.save_local(_INDEX_PATH)
 
-# ─── Agent & tools setup ────────────────────────────────────────────────────────
-# LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash", temperature=0.1, top_p=0.9, max_output_tokens=2048
-)
+    # free memory
+    del docs, chunks
+    gc.collect()
+    return db
 
-# Tools
+
+def get_vectordb():
+    global _graph
+    if _graph is None:
+        try:
+            _graph = FAISS.load_local(_INDEX_PATH, embeddings)
+            logging.info("Loaded FAISS index from disk.")
+        except Exception:
+            _graph = build_vectordb()
+    return _graph
+
+# ─── Global agent & tools (initialized once) ─────────────────────────────────
+# Initialize FAISS and tools at import time (once per worker)
+vectordb = get_vectordb()
+
 tools = []
-if retriever:
-    retriever_tool = create_retriever_tool(
-        retriever, 
-        name="knowledge_base",
-        description="Search MANIT documents and PDFs"
+if vectordb:
+    retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+    from langchain.tools import Tool as LCITool
+    tools.append(
+        LCITool.from_function(
+            func=retriever.get_relevant_documents,
+            name="knowledge_base",
+            description="Search MANIT documents and PDFs"
+        )
     )
-    tools.append(retriever_tool)
 
-# Google Search
-search_wrapper = GoogleSearchAPIWrapper(k=5)
-tools.append(GoogleSearchResults(api_wrapper=search_wrapper))
+# External live tools
+tools.append(GoogleSearchResults(api_wrapper=GoogleSearchAPIWrapper(k=5)))
+tools.append(ArxivQueryRun(api_wrapper=ArxivAPIWrapper(top_k_results=3, doc_content_chars_max=300)))
 
-# arXiv
-arxiv_wrapper = ArxivAPIWrapper(top_k_results=3, doc_content_chars_max=300)
-tools.append(ArxivQueryRun(api_wrapper=arxiv_wrapper))
-
-# Agent
+# LLM + agent prompt
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.1, top_p=0.9, max_output_tokens=2048)
 prompt = hub.pull("hwchase17/openai-functions-agent")
-agent  = create_openai_tools_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(
-    agent=agent, tools=tools, verbose=True,
-    max_iterations=5, early_stopping_method="generate"
-)
 
-# Direct QA chain
-qa_prompt = ChatPromptTemplate.from_template("""
-Answer based only on the context below. Think step-by-step.
-<context>
-{context}
-</context>
-Question: {input}
-""")
-document_chain   = create_stuff_documents_chain(llm, qa_prompt)
-retrieval_chain  = create_retrieval_chain(retriever, document_chain) if retriever else None
-
-def process_query(query: str, use_agent: bool = True) -> str:
-    if use_agent:
-        out = agent_executor.invoke({"input": query})
-        return out["output"]
-    else:
-        out = retrieval_chain.invoke({"input": query})
-        return out["answer"]
+# Build the agent executor once
+tagent = create_openai_tools_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=tagent, tools=tools, verbose=False, max_iterations=5, early_stopping_method="generate")
 
 # ─── Flask App ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -192,16 +185,11 @@ def handle_query():
     if not msg:
         return jsonify(status="error", message="Missing 'message' field"), 400
 
-    use_agent = bool(data.get("use_agent", True))
     try:
-        resp_text = process_query(msg, use_agent)
-        return jsonify(
-            status="success",
-            message_received=msg,
-            use_agent=use_agent,
-            response=resp_text
-        ), 200
+        response = agent_executor.invoke({"input": msg})["output"]
+        return jsonify(status="success", message_received=msg, response=response), 200
     except Exception as e:
+        logging.error(f"[handle_query] {e}")
         return jsonify(status="error", message=str(e)), 500
 
 @app.route('/health', methods=['GET'])
@@ -209,5 +197,5 @@ def health_check():
     return jsonify(status="healthy"), 200
 
 if __name__ == '__main__':
-    # Make sure your environment variables are set, then:
-    app.run(debug=True, host='0.0.0.0', port=os.getenv("PORT", 3000))
+    app.run(debug=True, host='0.0.0.0', port=int(os.getenv("PORT", 3000)))
+
