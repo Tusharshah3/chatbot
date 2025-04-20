@@ -24,3 +24,5 @@ langchain-google-community>=0.1.2
 
 # (Optional) if you want arXiv wrapper stand‑alone
 arxiv>=1.4.0
+pypdf
+logging

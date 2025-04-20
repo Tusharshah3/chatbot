@@ -2,6 +2,7 @@ import os
 import tempfile
 import requests
 import warnings
+import logging
 from urllib.parse import urljoin
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -37,6 +38,7 @@ warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY", "")
 os.environ["GOOGLE_CSE_ID"] = os.getenv("GOOGLE_CSE_ID", "")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ─── Helper functions ────────────────────────────────────────────────────────────
 def extract_pdf_links(url, base_domain="https://www.manit.ac.in"):
@@ -51,7 +53,7 @@ def extract_pdf_links(url, base_domain="https://www.manit.ac.in"):
                 links.append(href if href.startswith('http') else urljoin(base_domain, href))
         return links
     except Exception as e:
-        print(f"[extract_pdf_links] {e}")
+        logging.error("error {e}")
         return []
 
 def load_pdf_content(pdf_url):
@@ -64,10 +66,10 @@ def load_pdf_content(pdf_url):
         loader = PyPDFLoader(path)
         docs = loader.load()
         os.unlink(path)
-        print(f"Loaded PDF: {pdf_url}")
+        logging.info("Loaded PDF: {pdf_url}")
         return docs
     except Exception as e:
-        print(f"[load_pdf_content] {e}")
+        logging.info("[load_pdf_content] {e}")
         return []
 
 def safe_load_webpage(url):
@@ -80,17 +82,17 @@ def safe_load_webpage(url):
         print(f"Loaded webpage: {url}")
         return docs
     except Exception as e:
-        print(f"[safe_load_webpage] {e}")
+        logging.ino("[safe_load_webpage] {e}")
         return []
 
 def load_local_pdf(path):
     try:
         loader = PyPDFLoader(path)
         docs = loader.load()
-        print(f"Loaded local PDF: {path}")
+        logging.ino(f"Loaded local PDF: {path}")
         return docs
     except Exception as e:
-        print(f"[load_local_pdf] {e}")
+        logging.info(f"[load_local_pdf] {e}")
         return []
 
 # ─── Build your knowledge base ──────────────────────────────────────────────────
@@ -113,11 +115,11 @@ for url in manit_urls:
         all_docs += load_pdf_content(pdf)
 
 if not all_docs:
-    print("⚠️  No docs loaded; fallback to live search only.")
+    logging.info("⚠️  No docs loaded; fallback to live search only.")
 else:
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     documents = splitter.split_documents(all_docs)
-    print(f"Document chunks: {len(documents)}")
+    logging.info(f"Document chunks: {len(documents)}")
 
 # 3) Vector store & retriever
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
@@ -181,6 +183,7 @@ CORS(app)
 
 @app.route('/api/chat', methods=['POST'])
 def handle_query():
+    logging.info("Received request")
     data = request.get_json(silent=True)
     if not data:
         return jsonify(status="error", message="Request body must be JSON"), 400
