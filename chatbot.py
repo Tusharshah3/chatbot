@@ -45,13 +45,13 @@ embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
 
 # URLs to crawl at index build time
 MANIT_URLS = [
-    "https://www.manit.ac.in/",
-    "https://www.manit.ac.in/academics",
-    "https://www.manit.ac.in/content/electrical-engineering",
-    "https://www.manit.ac.in/academics/programs"
+#     "https://www.manit.ac.in/",
+#     "https://www.manit.ac.in/academics",
+#     "https://www.manit.ac.in/content/electrical-engineering",
+#     "https://www.manit.ac.in/academics/programs"
 ]
 
-# ─── Data loaders ──────────────────────────────────────────────────────────────
+
 def extract_pdf_links(url, base_domain="https://www.manit.ac.in"):
     try:
         resp = requests.get(url, verify=False, timeout=10)
@@ -110,10 +110,10 @@ def build_vectordb():
     docs = []
     if os.path.exists("syllabus.pdf"):
         docs += load_local_pdf("syllabus.pdf")
-    # for url in MANIT_URLS:
-    #     docs += safe_load_webpage(url)
-    #     for pdf in extract_pdf_links(url)[:2]:
-    #         docs += load_pdf_content(pdf)
+    for url in MANIT_URLS:
+        docs += safe_load_webpage(url)
+        for pdf in extract_pdf_links(url)[:2]:
+            docs += load_pdf_content(pdf)
 
     if not docs:
         logging.info("No documents loaded; skipping FAISS index.")
